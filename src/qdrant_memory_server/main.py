@@ -43,15 +43,26 @@ try:
     info = qc.get_collection(COLLECTION)
     vcfg = info.config.params.vectors
     if isinstance(vcfg, dict):
-        assert VECTOR_NAME in vcfg, f"Collection has no vector named '{VECTOR_NAME}'. Available={list(vcfg.keys())}"
+        assert VECTOR_NAME in vcfg, (
+            f"Collection has no vector named '{VECTOR_NAME}'. Available={list(vcfg.keys())}"
+        )
         size = vcfg[VECTOR_NAME].size
     else:
         size = vcfg.size
         if VECTOR_NAME != "":
-            print(f"[warn] collection is single-vector. VECTOR_NAME='{VECTOR_NAME}' may not match its actual name.", file=sys.stderr)
+            print(
+                f"[warn] collection is single-vector. VECTOR_NAME='{VECTOR_NAME}' may not match its actual name.",
+                file=sys.stderr,
+            )
     assert size == len(test_vec), f"Vector dim mismatch: collection={size}, embed={len(test_vec)}"
     print(f"[init] collection OK (dim={size})", file=sys.stderr)
-except (ValueError, AssertionError, ImportError, UnexpectedResponse, requests.RequestException) as e:
+except (
+    ValueError,
+    AssertionError,
+    ImportError,
+    UnexpectedResponse,
+    requests.RequestException,
+) as e:
     print(f"[init] skip schema check (might be creating later): {e}", file=sys.stderr)
 
 
@@ -105,7 +116,9 @@ def build_filter(f: Optional[Dict[str, Any]]) -> Optional[qm.Filter]:
         for cond in clause:
             key = cond.get("key")
             if "match" in cond:
-                out.append(qm.FieldCondition(key=key, match=qm.MatchValue(value=cond["match"]["value"])))
+                out.append(
+                    qm.FieldCondition(key=key, match=qm.MatchValue(value=cond["match"]["value"]))
+                )
             elif "in" in cond:
                 out.append(qm.FieldCondition(key=key, match=qm.MatchAny(any=cond["in"])))
             elif "range" in cond:
@@ -125,7 +138,9 @@ def build_filter(f: Optional[Dict[str, Any]]) -> Optional[qm.Filter]:
 app = FastMCP()
 
 @app.tool(name="qdrant_recreate_collection", description="コレクションを削除→作成（named vector対応 / 既存は削除）")
-def recreate_collection(collection_name: Optional[str] = None, dim: int = 384, distance: str = "COSINE") -> str:
+def recreate_collection(collection_name: Optional[str] = None,
+                        dim: int = 384,
+                        distance: str = "COSINE") -> str:
     name = collection_name or COLLECTION
     try:
         try:
@@ -134,15 +149,25 @@ def recreate_collection(collection_name: Optional[str] = None, dim: int = 384, d
         except (UnexpectedResponse, requests.RequestException):
             pass
         qc.create_collection(
-            collection_name=name, vectors_config={VECTOR_NAME: qm.VectorParams(size=dim, distance=getattr(qm.Distance, distance))}, on_disk_payload=True
+            collection_name=name,
+            vectors_config={
+                VECTOR_NAME: qm.VectorParams(
+                    size=dim, distance=getattr(qm.Distance, distance)
+                )
+            },
+            on_disk_payload=True,
         )
-        return f"Recreated '{name}' with named vector '{VECTOR_NAME}' dim={dim} distance={distance}"
+        return (
+            f"Recreated '{name}' with named vector '{VECTOR_NAME}' dim={dim} distance={distance}"
+        )
     except (ValueError, UnexpectedResponse, requests.RequestException) as e:
         return f"Error: {e}"
 
 
 @app.tool(name="qdrant_create_payload_indexes", description="payload index をまとめて作成（keyword/datetime/integer）")
-def create_payload_indexes(fields: Dict[str, str], collection_name: Optional[str] = None) -> str:
+def create_payload_indexes(
+    fields: Dict[str, str], collection_name: Optional[str] = None
+) -> str:
     """
     fields 例:
       {"doc_type":"keyword","section_path":"keyword","tags":"keyword","lang":"keyword","ingested_at":"datetime","authority":"integer"}
@@ -171,7 +196,9 @@ def create_payload_indexes(fields: Dict[str, str], collection_name: Optional[str
         "points=[{id?, payload{ text か raw_md（無ければ headers）, 任意のメタ }}] を upsert。\n" "id未指定なら section_path から UUIDv5 を生成（安定上書き）。"
     ),
 )
-def upsert_with_metadata(points: List[Dict[str, Any]], collection_name: Optional[str] = None) -> str:
+def upsert_with_metadata(
+    points: List[Dict[str, Any]], collection_name: Optional[str] = None
+) -> str:
     name = collection_name or COLLECTION
     try:
         texts, ids, payloads = [], [], []
@@ -181,7 +208,9 @@ def upsert_with_metadata(points: List[Dict[str, Any]], collection_name: Optional
             # 埋め込み本文を選択（chunk: text / doc: raw_md / 最後に headers）
             txt = pick_text_for_embedding(pl)
             if not txt:
-                return "Error: payload.text も raw_md も headers も見つかりません。埋め込み用の本文が必要です。"
+                return (
+                    "Error: payload.text も raw_md も headers も見つかりません。埋め込み用の本文が必要です。"
+                )
             texts.append(txt)
 
             # section_path を優先（chunk で未設定なら chunk_of + chunk_index から擬似生成）
@@ -199,10 +228,18 @@ def upsert_with_metadata(points: List[Dict[str, Any]], collection_name: Optional
             payloads.append(pl)
 
         vectors = embed_texts(texts)
-        qpoints = [qm.PointStruct(id=i, vector={VECTOR_NAME: v}, payload=pl) for i, v, pl in zip(ids, vectors, payloads)]
+        qpoints = [
+            qm.PointStruct(id=i, vector={VECTOR_NAME: v}, payload=pl)
+            for i, v, pl in zip(ids, vectors, payloads)
+        ]
         qc.upsert(collection_name=name, points=qpoints, wait=True)
         return f"Upserted {len(qpoints)} points into '{name}'."
-    except (ValueError, TypeError, UnexpectedResponse, requests.RequestException) as e:
+    except (
+        ValueError,
+        TypeError,
+        UnexpectedResponse,
+        requests.RequestException,
+    ) as e:
         print(f"[upsert] {e}", file=sys.stderr)
         return f"Error: {e}"
 
@@ -218,7 +255,12 @@ def advanced_search(
         print(f"[search] name={name} limit={limit} filter={metadata_filter}", file=sys.stderr)
         hits = qc.search(collection_name=name, query_vector=(VECTOR_NAME, qv), query_filter=flt, with_payload=True, limit=limit)
         return [h.model_dump() for h in hits]
-    except (ValueError, TypeError, UnexpectedResponse, requests.RequestException) as e:
+    except (
+        ValueError,
+        TypeError,
+        UnexpectedResponse,
+        requests.RequestException,
+    ) as e:
         print(f"[search] {e}", file=sys.stderr)
         return [{"error": str(e)}]
 
@@ -235,7 +277,12 @@ def filter_only_search(metadata_filter: Dict[str, Any], limit: int = 100, collec
 
         scroll_response, _ = qc.scroll(collection_name=name, scroll_filter=flt, with_payload=True, limit=limit)
         return [h.model_dump() for h in scroll_response]
-    except (ValueError, TypeError, UnexpectedResponse, requests.RequestException) as e:
+    except (
+        ValueError,
+        TypeError,
+        UnexpectedResponse,
+        requests.RequestException,
+    ) as e:
         print(f"[scroll] {e}", file=sys.stderr)
         return [{"error": str(e)}]
 
@@ -247,7 +294,12 @@ def delete_by_filter(metadata_filter: Optional[Dict[str, Any]] = None, collectio
         flt = build_filter(metadata_filter)
         qc.delete(name, points_selector=qm.FilterSelector(filter=flt), wait=True)
         return f"Deleted points in '{name}' by filter."
-    except (ValueError, TypeError, UnexpectedResponse, requests.RequestException) as e:
+    except (
+        ValueError,
+        TypeError,
+        UnexpectedResponse,
+        requests.RequestException,
+    ) as e:
         return f"Error: {e}"
 
 
