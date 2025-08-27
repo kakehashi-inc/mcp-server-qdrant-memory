@@ -1,10 +1,15 @@
 # run_qdrant_mcp_server.py  — v5安定ID & テキストフォールバック対応版
-import os, sys, uuid, json
-from typing import List, Dict, Any, Optional
+# import json
+import os
+import sys
+import uuid
+from typing import Any, Dict, List, Optional
 
+import requests
 from fastmcp.server import FastMCP
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
+from qdrant_client.http.exceptions import UnexpectedResponse
 from sentence_transformers import SentenceTransformer
 
 # ====== 1) 設定 ======
@@ -29,7 +34,7 @@ model = SentenceTransformer(EMB_MODEL, device="cpu")  # CPUでOK
 try:
     test_vec = model.encode(["test"], batch_size=1, normalize_embeddings=True)[0].tolist()
     print(f"[init] embed dim={len(test_vec)}", file=sys.stderr)
-except Exception as e:
+except (ValueError, TypeError, ImportError, OSError) as e:
     print(f"[init] embedding failed: {e}", file=sys.stderr)
     raise
 
@@ -46,7 +51,7 @@ try:
             print(f"[warn] collection is single-vector. VECTOR_NAME='{VECTOR_NAME}' may not match its actual name.", file=sys.stderr)
     assert size == len(test_vec), f"Vector dim mismatch: collection={size}, embed={len(test_vec)}"
     print(f"[init] collection OK (dim={size})", file=sys.stderr)
-except Exception as e:
+except (ValueError, AssertionError, ImportError, UnexpectedResponse, requests.RequestException) as e:
     print(f"[init] skip schema check (might be creating later): {e}", file=sys.stderr)
 
 
@@ -80,7 +85,7 @@ def pick_text_for_embedding(pl: Dict[str, Any]) -> str:
             j = " / ".join(str(h) for h in headers if h)
             if j.strip():
                 return j
-        except Exception:
+        except (TypeError, ValueError):
             pass
     return ""
 
@@ -119,26 +124,25 @@ def build_filter(f: Optional[Dict[str, Any]]) -> Optional[qm.Filter]:
 # ====== 4) MCP アプリ ======
 app = FastMCP()
 
-
 @app.tool(name="qdrant_recreate_collection", description="コレクションを削除→作成（named vector対応 / 既存は削除）")
-def recreate_collection(ctx, collection_name: Optional[str] = None, dim: int = 384, distance: str = "COSINE") -> str:
+def recreate_collection(collection_name: Optional[str] = None, dim: int = 384, distance: str = "COSINE") -> str:
     name = collection_name or COLLECTION
     try:
         try:
             qc.delete_collection(name)
             print(f"[recreate] deleted {name}", file=sys.stderr)
-        except Exception:
+        except (UnexpectedResponse, requests.RequestException):
             pass
         qc.create_collection(
             collection_name=name, vectors_config={VECTOR_NAME: qm.VectorParams(size=dim, distance=getattr(qm.Distance, distance))}, on_disk_payload=True
         )
         return f"Recreated '{name}' with named vector '{VECTOR_NAME}' dim={dim} distance={distance}"
-    except Exception as e:
+    except (ValueError, UnexpectedResponse, requests.RequestException) as e:
         return f"Error: {e}"
 
 
 @app.tool(name="qdrant_create_payload_indexes", description="payload index をまとめて作成（keyword/datetime/integer）")
-def create_payload_indexes(ctx, fields: Dict[str, str], collection_name: Optional[str] = None) -> str:
+def create_payload_indexes(fields: Dict[str, str], collection_name: Optional[str] = None) -> str:
     """
     fields 例:
       {"doc_type":"keyword","section_path":"keyword","tags":"keyword","lang":"keyword","ingested_at":"datetime","authority":"integer"}
@@ -157,7 +161,7 @@ def create_payload_indexes(ctx, fields: Dict[str, str], collection_name: Optiona
             qc.create_payload_index(name, field_name=k, field_schema=schema)
             print(f"[index] {k} -> {typ}", file=sys.stderr)
         return f"Indexed {len(fields)} fields on '{name}'"
-    except Exception as e:
+    except (ValueError, UnexpectedResponse, requests.RequestException) as e:
         return f"Error: {e}"
 
 
@@ -167,7 +171,7 @@ def create_payload_indexes(ctx, fields: Dict[str, str], collection_name: Optiona
         "points=[{id?, payload{ text か raw_md（無ければ headers）, 任意のメタ }}] を upsert。\n" "id未指定なら section_path から UUIDv5 を生成（安定上書き）。"
     ),
 )
-def upsert_with_metadata(ctx, points: List[Dict[str, Any]], collection_name: Optional[str] = None) -> str:
+def upsert_with_metadata(points: List[Dict[str, Any]], collection_name: Optional[str] = None) -> str:
     name = collection_name or COLLECTION
     try:
         texts, ids, payloads = [], [], []
@@ -188,7 +192,7 @@ def upsert_with_metadata(ctx, points: List[Dict[str, Any]], collection_name: Opt
                 if base and idx is not None:
                     try:
                         sp = f"{base}.c{int(idx):04d}"
-                    except Exception:
+                    except (ValueError, TypeError):
                         sp = None
 
             ids.append(ensure_uuid(p.get("id"), section_path=sp))
@@ -198,14 +202,14 @@ def upsert_with_metadata(ctx, points: List[Dict[str, Any]], collection_name: Opt
         qpoints = [qm.PointStruct(id=i, vector={VECTOR_NAME: v}, payload=pl) for i, v, pl in zip(ids, vectors, payloads)]
         qc.upsert(collection_name=name, points=qpoints, wait=True)
         return f"Upserted {len(qpoints)} points into '{name}'."
-    except Exception as e:
+    except (ValueError, TypeError, UnexpectedResponse, requests.RequestException) as e:
         print(f"[upsert] {e}", file=sys.stderr)
         return f"Error: {e}"
 
 
 @app.tool(name="qdrant_advanced_search", description="ベクトル＋payload filter 検索。query_text を埋め込み、limit件返す。")
 def advanced_search(
-    ctx, query_text: str, metadata_filter: Optional[Dict[str, Any]] = None, limit: int = 8, collection_name: Optional[str] = None
+    query_text: str, metadata_filter: Optional[Dict[str, Any]] = None, limit: int = 8, collection_name: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     name = collection_name or COLLECTION
     try:
@@ -214,13 +218,13 @@ def advanced_search(
         print(f"[search] name={name} limit={limit} filter={metadata_filter}", file=sys.stderr)
         hits = qc.search(collection_name=name, query_vector=(VECTOR_NAME, qv), query_filter=flt, with_payload=True, limit=limit)
         return [h.model_dump() for h in hits]
-    except Exception as e:
+    except (ValueError, TypeError, UnexpectedResponse, requests.RequestException) as e:
         print(f"[search] {e}", file=sys.stderr)
         return [{"error": str(e)}]
 
 
 @app.tool(name="qdrant_filter_only_search", description="ベクトル検索を行わず、metadata_filterのみで全ての条件に一致するポイントを取得します。")
-def filter_only_search(ctx, metadata_filter: Dict[str, Any], limit: int = 100, collection_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def filter_only_search(metadata_filter: Dict[str, Any], limit: int = 100, collection_name: Optional[str] = None) -> List[Dict[str, Any]]:
     name = collection_name or COLLECTION
     try:
         flt = build_filter(metadata_filter)
@@ -231,19 +235,19 @@ def filter_only_search(ctx, metadata_filter: Dict[str, Any], limit: int = 100, c
 
         scroll_response, _ = qc.scroll(collection_name=name, scroll_filter=flt, with_payload=True, limit=limit)
         return [h.model_dump() for h in scroll_response]
-    except Exception as e:
+    except (ValueError, TypeError, UnexpectedResponse, requests.RequestException) as e:
         print(f"[scroll] {e}", file=sys.stderr)
         return [{"error": str(e)}]
 
 
 @app.tool(name="qdrant_delete_by_filter", description="Filter 条件でポイントを削除")
-def delete_by_filter(ctx, metadata_filter: Optional[Dict[str, Any]] = None, collection_name: Optional[str] = None) -> str:
+def delete_by_filter(metadata_filter: Optional[Dict[str, Any]] = None, collection_name: Optional[str] = None) -> str:
     name = collection_name or COLLECTION
     try:
         flt = build_filter(metadata_filter)
         qc.delete(name, points_selector=qm.FilterSelector(filter=flt), wait=True)
         return f"Deleted points in '{name}' by filter."
-    except Exception as e:
+    except (ValueError, TypeError, UnexpectedResponse, requests.RequestException) as e:
         return f"Error: {e}"
 
 
