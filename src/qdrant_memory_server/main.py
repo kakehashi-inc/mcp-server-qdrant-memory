@@ -71,7 +71,7 @@ def ensure_uuid(given_id: Optional[Any], section_path: Optional[str] = None) -> 
     """
     IDが未指定/空なら:
       - section_path から UUIDv5 を生成（安定上書き用）
-      - section_path も無ければ UUIDv4 にフォールバック
+      - section_path も無ければ UUIDv4 にフォールバック（基本はsection_pathがあるのでこれはあまり使わない）
     """
     if given_id not in (None, "", []):
         return given_id
